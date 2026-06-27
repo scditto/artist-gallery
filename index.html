@@ -80,6 +80,7 @@
   <div class="ctl"><label>Eddy scale <b id="vScale"></b></label><input type="range" id="scale" min="8" max="90" value="48"></div>
   <div class="ctl"><label>Swirl sharpness <b id="vRamp"></b></label><input type="range" id="ramp" min="5" max="100" value="68"></div>
   <div class="ctl"><label>Persistence <b id="vDiss"></b></label><input type="range" id="diss" min="0" max="100" value="40"></div>
+  <div class="ctl"><label>Color feed <b id="vFeed"></b></label><input type="range" id="feed" min="0" max="100" value="30"></div>
   <div class="ctl"><label>Color vividness <b id="vSat"></b></label><input type="range" id="sat" min="80" max="180" value="140"></div>
 
   <div class="row"><button class="act live" id="play">Pause</button><button class="act" id="next">Next image</button></div>
@@ -168,7 +169,7 @@ vec4 sampleFilm(vec2 q){
 /* === core dye advection (model 0 curl / 2 pigment via u_mode) === */
 const FRAG_DYE=HEAD+FILM+`
 uniform sampler2D u_prev; uniform vec2 u_texel;
-uniform float u_time,u_dt,u_inj,u_flow,u_scale,u_down,u_diss; uniform int u_mode;
+uniform float u_time,u_dt,u_inj,u_flow,u_scale,u_down,u_diss,u_feed; uniform int u_mode;
 void main(){
   vec2 vel=curl(uv,u_scale,u_time)*u_flow*swirlAmp(uv)+vec2(0.,-u_down);
   vec2 s=clamp(uv-vel*u_dt,vec2(0.001),vec2(0.999));
@@ -182,7 +183,7 @@ void main(){
     col=km_rgb(ks);
   }
   vec4 fv=sampleFilm(uv);
-  float pin=u_inj*(1.0-swirlAmp(uv))*fv.a;
+  float pin=u_inj*((1.0-swirlAmp(uv))+u_feed*swirlAmp(uv))*fv.a;
   col=(u_mode==1)?km_mix(col,fv.rgb,pin):mix(col,fv.rgb,pin);
   col*=smoothstep(0.,0.05,uv.y);
   outc=vec4(col,1.);
@@ -223,9 +224,9 @@ const F_GRAD=HEAD+`uniform sampler2D u_p,u_vel; uniform vec2 u_texel;
 void main(){ float L=texture(u_p,uv-vec2(u_texel.x,0.)).x,R=texture(u_p,uv+vec2(u_texel.x,0.)).x;
   float B=texture(u_p,uv-vec2(0.,u_texel.y)).x,T=texture(u_p,uv+vec2(0.,u_texel.y)).x;
   vec2 v=texture(u_vel,uv).xy; v-=0.5*vec2(R-L,T-B); outc=vec4(v,0.,1.); }`;
-const F_INJECT=HEAD+FILM+`uniform sampler2D u_dye; uniform float u_inj; uniform int u_pig;
+const F_INJECT=HEAD+FILM+`uniform sampler2D u_dye; uniform float u_inj,u_feed; uniform int u_pig;
 void main(){ vec3 col=texture(u_dye,uv).rgb; vec4 fv=sampleFilm(uv);
-  float pin=u_inj*(1.0-swirlAmp(uv))*fv.a; col=(u_pig==1)?km_mix(col,fv.rgb,pin):mix(col,fv.rgb,pin);
+  float pin=u_inj*((1.0-swirlAmp(uv))+u_feed*swirlAmp(uv))*fv.a; col=(u_pig==1)?km_mix(col,fv.rgb,pin):mix(col,fv.rgb,pin);
   col*=smoothstep(0.,0.05,uv.y); outc=vec4(col,1.); }`;
 
 /* === particles === */
@@ -262,7 +263,7 @@ precision highp float; in vec2 uv; out vec4 o; uniform sampler2D u_tex; uniform 
 void main(){ o=texture(u_tex,uv)*u_persist; }`;
 
 /* ---- build core programs (must succeed) ---- */
-const pDye=prog(VERT,FRAG_DYE), uDye=U(pDye,['u_prev','u_texel','u_time','u_dt','u_inj','u_flow','u_scale','u_down','u_diss','u_mode','u_onset','u_ramp','u_src0','u_src1','u_ar0','u_ar1','u_scroll','u_screenA','u_fill']);
+const pDye=prog(VERT,FRAG_DYE), uDye=U(pDye,['u_prev','u_texel','u_time','u_dt','u_inj','u_feed','u_flow','u_scale','u_down','u_diss','u_mode','u_onset','u_ramp','u_src0','u_src1','u_ar0','u_ar1','u_scroll','u_screenA','u_fill']);
 const pShow=prog(VERT,SHOW), uShow=U(pShow,['u_tex','u_sat','u_onset','u_ramp','u_src0','u_src1','u_ar0','u_ar1','u_scroll','u_screenA','u_fill']);
 
 /* ---- optional pipelines, each guarded ---- */
@@ -279,7 +280,7 @@ if(hf){
       div:U(FLUID.div,['u_vel','u_texel','u_onset','u_ramp']),
       jac:U(FLUID.jac,['u_p','u_div','u_texel','u_onset','u_ramp']),
       grad:U(FLUID.grad,['u_p','u_vel','u_texel','u_onset','u_ramp']),
-      inj:U(FLUID.inj,['u_dye','u_inj','u_onset','u_ramp','u_src0','u_src1','u_ar0','u_ar1','u_scroll','u_screenA','u_pig','u_fill'])
+      inj:U(FLUID.inj,['u_dye','u_inj','u_feed','u_onset','u_ramp','u_src0','u_src1','u_ar0','u_ar1','u_scroll','u_screenA','u_pig','u_fill'])
     };
   }catch(e){ console.warn('fluid disabled:',e); FLUID=null; }
   try{
@@ -416,7 +417,7 @@ function buildFraming(){ framingEl.innerHTML='';
 buildFraming();
 
 /* ---- controls ---- */
-const P={onset:28,speed:13,flow:50,scale:34,ramp:150,diss:96,sat:124};
+const P={onset:28,speed:13,flow:50,scale:34,ramp:150,diss:96,sat:124,feed:30};
 function bind(id,key,fmt){const el=document.getElementById(id),lbl=document.getElementById('v'+id[0].toUpperCase()+id.slice(1));
   const upd=()=>{P[key]=+el.value;lbl.textContent=fmt(+el.value);};el.oninput=upd;upd();}
 bind('onset','onset',v=>v===0?'now':v===100?'never':v+'%');
@@ -424,7 +425,8 @@ bind('speed','speed',v=>v);
 bind('flow','flow',v=>v);
 bind('scale','scale',v=>v);
 bind('ramp','ramp',v=>v+'%');
-bind('diss','diss',v=>(0.970+(v-80)/20*0.029).toFixed(3));
+bind('diss','diss',v=>{const s=v/100,a=0.03,b=4.0;return Math.exp(-a*Math.pow(b/a,1-s)).toFixed(2)+'/s';});
+bind('feed','feed',v=>v+'%');
 bind('sat','sat',v=>(v/100).toFixed(2));
 let playing=true;
 document.getElementById('play').onclick=function(){playing=!playing;this.textContent=playing?'Pause':'Play';this.classList.toggle('live',playing);};
@@ -449,7 +451,7 @@ function resetAll(){ if(dye){clearFB(dye.fa);clearFB(dye.fb);} if(hf&&vel){clear
   if(PART&&acc){clearFB(acc.fa);clearFB(acc.fb); allocParticles();} resetDescent(); }
 function switchMode(){ resetAll(); }
 const onsetN=()=>P.onset/100, rampN=()=>P.ramp/100, scaleN=()=>P.scale/10;
-const flowN=()=>P.flow/100*0.85, SPD=()=>0.0375*P.speed;
+const flowN=()=>P.flow/100*0.85, SPD=()=>0.0375*P.speed, feedN=()=>P.feed/100*0.5;
 const retSec=()=>{ const s=P.diss/100, a=0.03, b=4.0; return Math.exp(-a*Math.pow(b/a,1.0-s)); }; // fraction of color kept per SECOND
 let frDiss=0.95; const dissN=()=>frDiss;                                                          // per-frame value, set each frame from real dt
 const DT=1.0/60.0;
@@ -470,7 +472,7 @@ function stepDye(mode){
   bindTex(0,dye.a); gl.uniform1i(uDye.u_prev,0); setFilm(uDye,1,2);
   gl.uniform2f(uDye.u_texel,1/SW,1/SH);
   gl.uniform1f(uDye.u_time,acc_t); gl.uniform1f(uDye.u_dt,DT);
-  gl.uniform1f(uDye.u_inj,0.92); gl.uniform1f(uDye.u_flow,flowN());
+  gl.uniform1f(uDye.u_inj,0.92); gl.uniform1f(uDye.u_feed,feedN()); gl.uniform1f(uDye.u_flow,flowN());
   gl.uniform1f(uDye.u_scale,scaleN()); gl.uniform1f(uDye.u_down,SPD()); gl.uniform1f(uDye.u_diss,dissN());
   gl.uniform1i(uDye.u_mode,mode); commonAmp(uDye); draw(); swap(dye);
 }
@@ -504,7 +506,7 @@ function stepFluid(pig){ const tx=[1/SW,1/SH];
   // 7 inject image
   gl.useProgram(FLUID.inj); gl.bindFramebuffer(gl.FRAMEBUFFER,dye.fb);
   bindTex(0,dye.a);gl.uniform1i(FLUID.u.inj.u_dye,0); setFilm(FLUID.u.inj,1,2);
-  gl.uniform1f(FLUID.u.inj.u_inj,0.92); gl.uniform1i(FLUID.u.inj.u_pig,pig?1:0); commonAmp(FLUID.u.inj); draw(); swap(dye);
+  gl.uniform1f(FLUID.u.inj.u_inj,0.92); gl.uniform1f(FLUID.u.inj.u_feed,feedN()); gl.uniform1i(FLUID.u.inj.u_pig,pig?1:0); commonAmp(FLUID.u.inj); draw(); swap(dye);
 }
 function stepParticles(){ const W=PART.W;
   // update positions
