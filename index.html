@@ -71,13 +71,16 @@
 
   <div class="divider"></div>
 
-  <div class="ctl"><label>Swirl onset <b id="vOnset"></b></label><input type="range" id="onset" min="0" max="100" value="42"></div>
-  <div class="ctl"><label>Descent speed <b id="vSpeed"></b></label><input type="range" id="speed" min="2" max="40" value="10"></div>
+  <div class="eyebrow">Framing</div>
+  <div class="models" id="framing"></div>
+
+  <div class="ctl"><label>Swirl onset <b id="vOnset"></b></label><input type="range" id="onset" min="0" max="100" value="40"></div>
+  <div class="ctl"><label>Descent speed <b id="vSpeed"></b></label><input type="range" id="speed" min="2" max="40" value="2"></div>
   <div class="ctl"><label>Stir strength <b id="vFlow"></b></label><input type="range" id="flow" min="0" max="100" value="50"></div>
-  <div class="ctl"><label>Eddy scale <b id="vScale"></b></label><input type="range" id="scale" min="8" max="90" value="34"></div>
+  <div class="ctl"><label>Eddy scale <b id="vScale"></b></label><input type="range" id="scale" min="8" max="90" value="48"></div>
   <div class="ctl"><label>Swirl sharpness <b id="vRamp"></b></label><input type="range" id="ramp" min="5" max="100" value="68"></div>
-  <div class="ctl"><label>Persistence <b id="vDiss"></b></label><input type="range" id="diss" min="80" max="100" value="96"></div>
-  <div class="ctl"><label>Color vividness <b id="vSat"></b></label><input type="range" id="sat" min="80" max="180" value="124"></div>
+  <div class="ctl"><label>Persistence <b id="vDiss"></b></label><input type="range" id="diss" min="0" max="100" value="40"></div>
+  <div class="ctl"><label>Color vividness <b id="vSat"></b></label><input type="range" id="sat" min="80" max="180" value="140"></div>
 
   <div class="row"><button class="act live" id="play">Pause</button><button class="act" id="next">Next image</button></div>
   <div class="row"><button class="act" id="fs">Fullscreen</button><button class="act" id="clear">Clear canvas</button></div>
@@ -127,18 +130,38 @@ vec3 km_mix(vec3 a,vec3 b,float t){ return km_rgb(mix(km_ks(a),km_ks(b),t)); }
 `;
 
 const FILM=`
-uniform sampler2D u_src0,u_src1; uniform float u_scroll,u_ar0,u_ar1,u_screenA;
+uniform sampler2D u_src0,u_src1; uniform float u_scroll,u_ar0,u_ar1,u_screenA; uniform int u_fill;
 vec3 filmTap(bool nx, vec2 t){ t=clamp(t,0.0,1.0); return nx?texture(u_src1,t).rgb:texture(u_src0,t).rgb; }
 vec3 filmBlur(bool nx, vec2 t){ t=clamp(t,0.0,1.0); return nx?textureLod(u_src1,t,6.0).rgb:textureLod(u_src0,t,6.0).rgb; }
-vec4 sampleFilm(vec2 q){            // sharp contained image over a soft full-screen blur of itself -> no bars
+vec3 coverSample(vec2 q, bool nx, float local){      // crop-to-fill, with optional scroll-driven ken burns
+  float ar=nx?u_ar1:u_ar0; vec2 c;
+  if(ar>u_screenA){ c=vec2(0.5+(q.x-0.5)*(u_screenA/ar), local); }
+  else            { c=vec2(q.x, 0.5+(local-0.5)*(ar/u_screenA)); }
+  if(u_fill==2){
+    float slotf = nx ? floor(u_scroll)+1.0 : floor(u_scroll);
+    float seed=fract(sin(slotf*91.7137)*43758.5453);
+    float z=1.06+0.05*sin(u_scroll*0.55+seed*6.2831);
+    vec2 pan=vec2(sin(u_scroll*0.37+seed*6.0), sin(u_scroll*0.29+seed*3.1))*0.03;
+    c=(c-0.5)/z+0.5+pan;
+  }
+  return filmTap(nx, clamp(c,0.0,1.0));
+}
+vec4 sampleFilm(vec2 q){
   float p=q.y+u_scroll; float slot=floor(p); float local=p-slot;
   bool nx=slot>floor(u_scroll)+0.5; float ar=nx?u_ar1:u_ar0;
+  if(u_fill>=1){
+    float base=floor(u_scroll);
+    vec3 a=coverSample(q,false,p-base);
+    vec3 b=coverSample(q,true, p-(base+1.0));
+    float w=smoothstep(base+0.97, base+1.03, p);
+    return vec4(mix(a,b,w),1.0);
+  }
   vec2 cN, cv; float t;
   if(ar>u_screenA){ float hf=u_screenA/ar; cN=vec2(q.x,(local-0.5)/hf+0.5); cv=vec2((q.x-0.5)*(u_screenA/ar)+0.5, local); t=cN.y; }
   else            { float wf=ar/u_screenA; cN=vec2((q.x-0.5)/wf+0.5, local); cv=vec2(q.x,(local-0.5)*(ar/u_screenA)+0.5); t=cN.x; }
   vec3 sharp=filmTap(nx,cN);
-  vec3 bg=filmBlur(nx,(cv-0.5)*0.96+0.5)*0.9;          // heavy mip-blur cover fill (1 tap), soft and colorful
-  float cov=smoothstep(0.0,0.02,t)*(1.0-smoothstep(0.98,1.0,t));   // feather sharp->blur, no hard line
+  vec3 bg=filmBlur(nx,(cv-0.5)*0.96+0.5)*0.9;
+  float cov=smoothstep(0.0,0.02,t)*(1.0-smoothstep(0.98,1.0,t));
   return vec4(mix(bg,sharp,cov),1.0);
 }`;
 
@@ -239,8 +262,8 @@ precision highp float; in vec2 uv; out vec4 o; uniform sampler2D u_tex; uniform 
 void main(){ o=texture(u_tex,uv)*u_persist; }`;
 
 /* ---- build core programs (must succeed) ---- */
-const pDye=prog(VERT,FRAG_DYE), uDye=U(pDye,['u_prev','u_texel','u_time','u_dt','u_inj','u_flow','u_scale','u_down','u_diss','u_mode','u_onset','u_ramp','u_src0','u_src1','u_ar0','u_ar1','u_scroll','u_screenA']);
-const pShow=prog(VERT,SHOW), uShow=U(pShow,['u_tex','u_sat','u_onset','u_ramp','u_src0','u_src1','u_ar0','u_ar1','u_scroll','u_screenA']);
+const pDye=prog(VERT,FRAG_DYE), uDye=U(pDye,['u_prev','u_texel','u_time','u_dt','u_inj','u_flow','u_scale','u_down','u_diss','u_mode','u_onset','u_ramp','u_src0','u_src1','u_ar0','u_ar1','u_scroll','u_screenA','u_fill']);
+const pShow=prog(VERT,SHOW), uShow=U(pShow,['u_tex','u_sat','u_onset','u_ramp','u_src0','u_src1','u_ar0','u_ar1','u_scroll','u_screenA','u_fill']);
 
 /* ---- optional pipelines, each guarded ---- */
 let FLUID=null, PART=null;
@@ -256,7 +279,7 @@ if(hf){
       div:U(FLUID.div,['u_vel','u_texel','u_onset','u_ramp']),
       jac:U(FLUID.jac,['u_p','u_div','u_texel','u_onset','u_ramp']),
       grad:U(FLUID.grad,['u_p','u_vel','u_texel','u_onset','u_ramp']),
-      inj:U(FLUID.inj,['u_dye','u_inj','u_onset','u_ramp','u_src0','u_src1','u_ar0','u_ar1','u_scroll','u_screenA','u_pig'])
+      inj:U(FLUID.inj,['u_dye','u_inj','u_onset','u_ramp','u_src0','u_src1','u_ar0','u_ar1','u_scroll','u_screenA','u_pig','u_fill'])
     };
   }catch(e){ console.warn('fluid disabled:',e); FLUID=null; }
   try{
@@ -267,7 +290,7 @@ if(hf){
     PART.u={
       init:U(PART.init,['u_life','u_onset','u_ramp']),
       pos:U(PART.pos,['u_pos','u_dt','u_life','u_time','u_flow','u_scale','u_down','u_onset','u_ramp']),
-      col:U(PART.col,['u_pos','u_col','u_dt','u_life','u_time','u_flow','u_scale','u_down','u_onset','u_ramp','u_src0','u_src1','u_ar0','u_ar1','u_scroll','u_screenA']),
+      col:U(PART.col,['u_pos','u_col','u_dt','u_life','u_time','u_flow','u_scale','u_down','u_onset','u_ramp','u_src0','u_src1','u_ar0','u_ar1','u_scroll','u_screenA','u_fill']),
       points:U(PART.points,['u_pos','u_col','u_W','u_psize','u_life']),
       fade:U(PART.fade,['u_tex','u_persist'])
     };
@@ -381,6 +404,17 @@ function buildModels(){
 }
 buildModels();
 
+const FRAMES=[{id:2,nm:'Fill + slow pan',ds:'Full-bleed, Ken Burns drift. Crops to fit.'},
+  {id:1,nm:'Fill',ds:'Full-bleed, static crop.'},
+  {id:0,nm:'Whole',ds:'Show the entire painting, blurred edges.'}];
+let FRAME=2;
+const framingEl=document.getElementById('framing');
+function buildFraming(){ framingEl.innerHTML='';
+  FRAMES.forEach(f=>{ const el=document.createElement('button'); el.className='model'+(f.id===FRAME?' on':'');
+    el.innerHTML='<span class="dot"></span><span><span class="nm">'+f.nm+'</span><span class="ds">'+f.ds+'</span></span>';
+    el.onclick=()=>{ FRAME=f.id; buildFraming(); }; framingEl.appendChild(el); }); }
+buildFraming();
+
 /* ---- controls ---- */
 const P={onset:28,speed:13,flow:50,scale:34,ramp:150,diss:96,sat:124};
 function bind(id,key,fmt){const el=document.getElementById(id),lbl=document.getElementById('v'+id[0].toUpperCase()+id.slice(1));
@@ -415,7 +449,9 @@ function resetAll(){ if(dye){clearFB(dye.fa);clearFB(dye.fb);} if(hf&&vel){clear
   if(PART&&acc){clearFB(acc.fa);clearFB(acc.fb); allocParticles();} resetDescent(); }
 function switchMode(){ resetAll(); }
 const onsetN=()=>P.onset/100, rampN=()=>P.ramp/100, scaleN=()=>P.scale/10;
-const flowN=()=>P.flow/100*0.85, SPD=()=>0.0375*P.speed, dissN=()=>0.970+(P.diss-80)/20*0.029;
+const flowN=()=>P.flow/100*0.85, SPD=()=>0.0375*P.speed;
+const retSec=()=>{ const s=P.diss/100, a=0.03, b=4.0; return Math.exp(-a*Math.pow(b/a,1.0-s)); }; // fraction of color kept per SECOND
+let frDiss=0.95; const dissN=()=>frDiss;                                                          // per-frame value, set each frame from real dt
 const DT=1.0/60.0;
 
 resize(); if(PART) allocParticles();
@@ -427,7 +463,7 @@ function setFilm(u,unit0,unit1){ const n=images.length, base=Math.floor(scroll);
   bindTex(unit0,images[i0].tex); gl.uniform1i(u.u_src0,unit0);
   bindTex(unit1,images[i1].tex); gl.uniform1i(u.u_src1,unit1);
   gl.uniform1f(u.u_ar0,images[i0].w/images[i0].h); gl.uniform1f(u.u_ar1,images[i1].w/images[i1].h);
-  gl.uniform1f(u.u_scroll,scroll); gl.uniform1f(u.u_screenA,cvs.clientWidth/cvs.clientHeight); }
+  gl.uniform1f(u.u_scroll,scroll); gl.uniform1f(u.u_screenA,cvs.clientWidth/cvs.clientHeight); gl.uniform1i(u.u_fill,FRAME); }
 
 function stepDye(mode){
   gl.useProgram(pDye); gl.bindFramebuffer(gl.FRAMEBUFFER,dye.fb); gl.viewport(0,0,SW,SH);
@@ -486,7 +522,7 @@ function stepParticles(){ const W=PART.W;
   gl.uniform1f(PART.u.col.u_scale,scaleN());gl.uniform1f(PART.u.col.u_down,SPD());commonAmp(PART.u.col); draw();
   swap(posPP); swap(colPP);
   // fade accumulation
-  const persist=0.86+(P.diss-80)/20*0.12;
+  const persist=frDiss;
   gl.useProgram(PART.fade); gl.bindFramebuffer(gl.FRAMEBUFFER,acc.fb); gl.viewport(0,0,SW,SH);
   gl.disable(gl.BLEND); bindTex(0,acc.a);gl.uniform1i(PART.u.fade.u_tex,0); gl.uniform1f(PART.u.fade.u_persist,persist); draw();
   // additive point render onto faded accum
@@ -506,6 +542,7 @@ function frame(now){
   if(images.length===0){ gl.bindFramebuffer(gl.FRAMEBUFFER,null); gl.viewport(0,0,cvs.width,cvs.height); gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT); requestAnimationFrame(frame); return; }
   if(playing){
     acc_t+=dt;
+    frDiss=Math.pow(retSec(),dt);   // frame-rate independent fade
     scroll+=SPD()*dt;
     const idx=((Math.floor(scroll)%images.length)+images.length)%images.length;
     if(idx!==current){ current=idx; markThumbs(); }
