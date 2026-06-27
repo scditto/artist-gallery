@@ -74,13 +74,13 @@
   <div class="eyebrow">Framing</div>
   <div class="models" id="framing"></div>
 
-  <div class="ctl"><label>Swirl onset <b id="vOnset"></b></label><input type="range" id="onset" min="0" max="100" value="40"></div>
+  <div class="ctl"><label>Swirl onset <b id="vOnset"></b></label><input type="range" id="onset" min="0" max="100" value="50"></div>
   <div class="ctl"><label>Descent speed <b id="vSpeed"></b></label><input type="range" id="speed" min="2" max="40" value="2"></div>
-  <div class="ctl"><label>Stir strength <b id="vFlow"></b></label><input type="range" id="flow" min="0" max="100" value="50"></div>
-  <div class="ctl"><label>Eddy scale <b id="vScale"></b></label><input type="range" id="scale" min="8" max="90" value="48"></div>
-  <div class="ctl"><label>Swirl sharpness <b id="vRamp"></b></label><input type="range" id="ramp" min="5" max="100" value="68"></div>
-  <div class="ctl"><label>Persistence <b id="vDiss"></b></label><input type="range" id="diss" min="0" max="100" value="40"></div>
-  <div class="ctl"><label>Color feed <b id="vFeed"></b></label><input type="range" id="feed" min="0" max="100" value="30"></div>
+  <div class="ctl"><label>Stir strength <b id="vFlow"></b></label><input type="range" id="flow" min="0" max="100" value="70"></div>
+  <div class="ctl"><label>Eddy scale <b id="vScale"></b></label><input type="range" id="scale" min="8" max="90" value="80"></div>
+  <div class="ctl"><label>Swirl sharpness <b id="vRamp"></b></label><input type="range" id="ramp" min="5" max="100" value="70"></div>
+  <div class="ctl"><label>Persistence <b id="vDiss"></b></label><input type="range" id="diss" min="0" max="100" value="39"></div>
+  <div class="ctl"><label>Color feed <b id="vFeed"></b></label><input type="range" id="feed" min="0" max="100" value="25"></div>
   <div class="ctl"><label>Color vividness <b id="vSat"></b></label><input type="range" id="sat" min="80" max="180" value="140"></div>
 
   <div class="row"><button class="act live" id="play">Pause</button><button class="act" id="next">Next image</button></div>
@@ -417,7 +417,7 @@ function buildFraming(){ framingEl.innerHTML='';
 buildFraming();
 
 /* ---- controls ---- */
-const P={onset:28,speed:13,flow:50,scale:34,ramp:150,diss:96,sat:124,feed:30};
+const P={onset:50,speed:2,flow:70,scale:80,ramp:70,diss:39,sat:140,feed:25};
 function bind(id,key,fmt){const el=document.getElementById(id),lbl=document.getElementById('v'+id[0].toUpperCase()+id.slice(1));
   const upd=()=>{P[key]=+el.value;lbl.textContent=fmt(+el.value);};el.oninput=upd;upd();}
 bind('onset','onset',v=>v===0?'now':v===100?'never':v+'%');
