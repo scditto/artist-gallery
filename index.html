@@ -262,12 +262,34 @@ const P_FADE=`#version 300 es
 precision highp float; in vec2 uv; out vec4 o; uniform sampler2D u_tex; uniform float u_persist;
 void main(){ o=texture(u_tex,uv)*u_persist; }`;
 
+const FRAG_IDENT=`#version 300 es
+precision highp float; in vec2 uv; out vec4 outc;
+void main(){ outc=vec4(uv,0.0,1.0); }`;
+/* === warp: advect a coordinate map along the eddies; the image is bent, never washed === */
+const FRAG_WARP=HEAD+`uniform sampler2D u_cmap; uniform float u_time,u_dt,u_flow,u_scale,u_down,u_relax;
+void main(){
+  vec2 vel=curl(uv,u_scale,u_time)*u_flow*swirlAmp(uv)+vec2(0.,-u_down);
+  vec2 c=texture(u_cmap,clamp(uv-vel*u_dt,vec2(0.001),vec2(0.999))).xy;   // transport the lookup coords
+  float relax=(1.0-swirlAmp(uv))+u_relax*swirlAmp(uv);                    // crisp above the line; slow relax below
+  c=mix(c,uv,clamp(relax,0.0,1.0));
+  outc=vec4(c,0.0,1.0);
+}`;
+const SHOW_WARP=HEAD+FILM+`uniform sampler2D u_cmap; uniform float u_sat;
+void main(){
+  vec2 c=texture(u_cmap,uv).xy;
+  vec3 col=sampleFilm(c).rgb;                       // the painting, read through the bent coordinates
+  float l=dot(col,vec3(0.2126,0.7152,0.0722));
+  col=clamp(mix(vec3(l),col,u_sat),0.,1.); col=pow(col,vec3(0.94));
+  float d=distance(uv,vec2(0.5)); col*=1.0-smoothstep(0.62,1.05,d)*0.5;
+  outc=vec4(col,1.0);
+}`;
+
 /* ---- build core programs (must succeed) ---- */
 const pDye=prog(VERT,FRAG_DYE), uDye=U(pDye,['u_prev','u_texel','u_time','u_dt','u_inj','u_feed','u_flow','u_scale','u_down','u_diss','u_mode','u_onset','u_ramp','u_src0','u_src1','u_ar0','u_ar1','u_scroll','u_screenA','u_fill']);
 const pShow=prog(VERT,SHOW), uShow=U(pShow,['u_tex','u_sat','u_onset','u_ramp','u_src0','u_src1','u_ar0','u_ar1','u_scroll','u_screenA','u_fill']);
 
 /* ---- optional pipelines, each guarded ---- */
-let FLUID=null, PART=null;
+let FLUID=null, PART=null, WARP=null;
 if(hf){
   try{
     FLUID={
@@ -296,6 +318,13 @@ if(hf){
       fade:U(PART.fade,['u_tex','u_persist'])
     };
   }catch(e){ console.warn('particles disabled:',e); PART=null; }
+  try{
+    WARP={ ident:prog(VERT,FRAG_IDENT), step:prog(VERT,FRAG_WARP), show:prog(VERT,SHOW_WARP) };
+    WARP.u={
+      step:U(WARP.step,['u_cmap','u_time','u_dt','u_flow','u_scale','u_down','u_relax','u_onset','u_ramp']),
+      show:U(WARP.show,['u_cmap','u_sat','u_onset','u_ramp','u_src0','u_src1','u_ar0','u_ar1','u_scroll','u_screenA','u_fill'])
+    };
+  }catch(e){ console.warn('warp disabled:',e); WARP=null; }
 }
 
 /* ---- geometry ---- */
@@ -315,7 +344,7 @@ function tex(w,h,fmt,type){const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);return t;}
 function fb(t){const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);
   gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);return f;}
-let dye,vel,pres,divT,divFB,acc; // each {a,b,fa,fb} ping-pong (divT single)
+let dye,vel,pres,divT,divFB,acc,cmap; // each {a,b,fa,fb} ping-pong (divT single)
 function makePP(w,h,fmt,type){const a=tex(w,h,fmt,type),b=tex(w,h,fmt,type);return{a,b,fa:fb(a),fb:fb(b)};}
 function swap(o){let t=o.a;o.a=o.b;o.b=t;t=o.fa;o.fa=o.fb;o.fb=t;}
 function clearFB(f){gl.bindFramebuffer(gl.FRAMEBUFFER,f);gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);}
@@ -335,7 +364,8 @@ function resize(){
   dye=makePP(SW,SH,CFMT,CTYPE); clearFB(dye.fa); clearFB(dye.fb);
   if(hf){ vel=makePP(SW,SH,gl.RGBA16F,gl.HALF_FLOAT); pres=makePP(SW,SH,gl.RGBA16F,gl.HALF_FLOAT);
     divT=tex(SW,SH,gl.RGBA16F,gl.HALF_FLOAT); divFB=fb(divT);
-    clearFB(vel.fa);clearFB(vel.fb);clearFB(pres.fa);clearFB(pres.fb); }
+    clearFB(vel.fa);clearFB(vel.fb);clearFB(pres.fa);clearFB(pres.fb);
+    if(WARP){ cmap=makePP(SW,SH,gl.RGBA16F,gl.HALF_FLOAT); initWarp(); } }
   if(PART){ acc=makePP(SW,SH,CFMT,CTYPE); clearFB(acc.fa); clearFB(acc.fb); }
 }
 function draw(){ gl.drawArrays(gl.TRIANGLES,0,3); }
@@ -385,21 +415,22 @@ const MOTIONS=[
   {id:0,nm:'Curl flow',ds:'Flowing displacement. Light and fast.'},
   {id:2,nm:'Fluid (Navier-Stokes)',ds:'Real solver with momentum.'},
   {id:3,nm:'Particles',ds:'~65k points of pigment.'},
+  {id:4,nm:'Warp (eddy)',ds:'Bends the image itself, no washout.'},
 ];
 let MOTION=0, PIG=true;
 const modelsEl=document.getElementById('models');
 function buildModels(){
   modelsEl.innerHTML='';
-  MOTIONS.forEach(m=>{ const avail=(m.id===0)||(m.id===2&&FLUID)||(m.id===3&&PART);
+  MOTIONS.forEach(m=>{ const avail=(m.id===0)||(m.id===2&&FLUID)||(m.id===3&&PART)||(m.id===4&&WARP);
     const el=document.createElement('button'); el.className='model'+(m.id===MOTION?' on':'');
     if(!avail) el.setAttribute('disabled','');
     el.innerHTML='<span class="dot"></span><span><span class="nm">'+m.nm+'</span><span class="ds">'+m.ds+(avail?'':' — needs float support')+'</span></span>';
     el.onclick=()=>{ if(!avail) return; MOTION=m.id; buildModels(); switchMode(); };
     modelsEl.appendChild(el); });
-  const dis=(MOTION===3);
+  const dis=(MOTION===3||MOTION===4);
   const t=document.createElement('button'); t.className='model'+(PIG&&!dis?' on':'');
   if(dis) t.setAttribute('disabled','');
-  t.innerHTML='<span class="dot"></span><span><span class="nm">Kubelka-Munk pigment</span><span class="ds">Subtractive paint mixing, layered onto Curl or Fluid'+(dis?' (n/a for particles)':'')+'.</span></span>';
+  t.innerHTML='<span class="dot"></span><span><span class="nm">Kubelka-Munk pigment</span><span class="ds">Subtractive paint mixing, layered onto Curl or Fluid'+(dis?' (n/a here)':'')+'.</span></span>';
   t.onclick=()=>{ if(dis) return; PIG=!PIG; buildModels(); switchMode(); };
   modelsEl.appendChild(t);
 }
@@ -448,7 +479,7 @@ const LIFE=3.2;
 let scroll=0;
 function resetDescent(){}
 function resetAll(){ if(dye){clearFB(dye.fa);clearFB(dye.fb);} if(hf&&vel){clearFB(vel.fa);clearFB(vel.fb);clearFB(pres.fa);clearFB(pres.fb);}
-  if(PART&&acc){clearFB(acc.fa);clearFB(acc.fb); allocParticles();} resetDescent(); }
+  if(PART&&acc){clearFB(acc.fa);clearFB(acc.fb); allocParticles();} if(hf&&WARP) initWarp(); resetDescent(); }
 function switchMode(){ resetAll(); }
 const onsetN=()=>P.onset/100, rampN=()=>P.ramp/100, scaleN=()=>P.scale/10;
 const flowN=()=>P.flow/100*0.85, SPD=()=>0.0375*P.speed, feedN=()=>P.feed/100*0.5;
@@ -535,6 +566,20 @@ function stepParticles(){ const W=PART.W;
   gl.disable(gl.BLEND); gl.bindVertexArray(vao); swap(acc);
 }
 
+function initWarp(){ if(!(hf&&WARP&&cmap)) return;
+  gl.useProgram(WARP.ident); gl.viewport(0,0,SW,SH);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,cmap.fa); draw();
+  gl.bindFramebuffer(gl.FRAMEBUFFER,cmap.fb); draw(); }
+function stepWarp(){
+  gl.useProgram(WARP.step); gl.bindFramebuffer(gl.FRAMEBUFFER,cmap.fb); gl.viewport(0,0,SW,SH);
+  bindTex(0,cmap.a); gl.uniform1i(WARP.u.step.u_cmap,0);
+  gl.uniform1f(WARP.u.step.u_time,acc_t); gl.uniform1f(WARP.u.step.u_dt,DT);
+  gl.uniform1f(WARP.u.step.u_flow,flowN()); gl.uniform1f(WARP.u.step.u_scale,scaleN());
+  gl.uniform1f(WARP.u.step.u_down,SPD()); gl.uniform1f(WARP.u.step.u_relax,1.0-frDiss);
+  commonAmp(WARP.u.step); draw(); swap(cmap); }
+function presentWarp(){ gl.useProgram(WARP.show); gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  gl.viewport(0,0,cvs.width,cvs.height); bindTex(0,cmap.a); gl.uniform1i(WARP.u.show.u_cmap,0);
+  setFilm(WARP.u.show,1,2); gl.uniform1f(WARP.u.show.u_sat,P.sat/100); commonAmp(WARP.u.show); draw(); }
 function present(srcTex){ gl.useProgram(pShow); gl.bindFramebuffer(gl.FRAMEBUFFER,null);
   gl.viewport(0,0,cvs.width,cvs.height); bindTex(0,srcTex); gl.uniform1i(uShow.u_tex,0); setFilm(uShow,1,2);
   gl.uniform1f(uShow.u_sat,P.sat/100); commonAmp(uShow); draw(); }
@@ -550,11 +595,14 @@ function frame(now){
     if(idx!==current){ current=idx; markThumbs(); }
     try{
       if(MOTION===3 && PART) stepParticles();
+      else if(MOTION===4 && WARP) stepWarp();
       else if(MOTION===2 && FLUID) stepFluid(PIG);
       else stepDye(PIG?1:0);
     }catch(e){ console.error('render error, falling back to curl:',e); MOTION=0; buildModels(); }
   }
-  if(MOTION===3 && PART) present(acc.a); else present(dye.a);
+  if(MOTION===3 && PART) present(acc.a);
+  else if(MOTION===4 && WARP) presentWarp();
+  else present(dye.a);
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
